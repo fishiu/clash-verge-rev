@@ -1,26 +1,29 @@
-name: Build Clash Verge Rev (v2.4.3)
+name: Build Clash Verge Rev (Dev/AppImage)
 
-on: 
+on:
   workflow_dispatch: # 手动触发
 
 jobs:
   build-linux:
-    runs-on: ubuntu-20.04 # 官方使用的是 20.04，我们也用旧一点的系统以保证兼容性
+    runs-on: ubuntu-22.04 # 官方推荐使用 22.04 构建 Tauri v2 应用
 
     steps:
-      # 1. 拉取代码：这次我们指定 v2.4.3 标签
+      # 1. 拉取代码 (关键修正：开启递归拉取子模块)
+      # 官方 dev 分支依赖子模块，不加 recursive 会导致 workspace 报错
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: v2.4.3  # <--- 锁定官方发布的 2.4.3 版本，保证代码没问题
-          submodules: recursive # 递归拉取子模块，防止缺文件
+          ref: dev             # 指定 dev 分支
+          submodules: recursive # <--- 关键！解决 pnpm workspace 报错
+          fetch-depth: 0        # 拉取完整历史，有助于版本号生成
 
-      # 2. 安装 Linux 系统依赖 (参考官方文档)
+      # 2. 安装 Linux 系统依赖 (适配 Tauri v2)
+      # 注意：这里换成了 libwebkit2gtk-4.1-dev，这是新版 Tauri 的强制要求
       - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.0-dev \
+            libwebkit2gtk-4.1-dev \
             build-essential \
             curl \
             wget \
@@ -30,7 +33,7 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
-      # 3. 安装 Rust
+      # 3. 安装 Rust (官方 dev 通常使用 stable)
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -42,33 +45,54 @@ jobs:
         with:
           node-version: 20
 
-      # 5. 安装 pnpm (使用项目指定的版本)
+      # 5. 安装 pnpm (锁定版本 v9)
       - name: Install pnpm
         uses: pnpm/action-setup@v3
         with:
-          version: 9.1.0 
+          version: 9
           run_install: false
 
-      # 6. 安装依赖 (关键步骤：加上 --no-frozen-lockfile)
-      # 这样即便 lock 文件有点问题，pnpm 也会尝试重新生成，避免 workspace 报错
-      - name: Install Frontend Dependencies
+      # 6. 安装前端依赖 (关键修正：忽略锁文件差异)
+      # 使用 --no-frozen-lockfile 强制根据当前 package.json 重建依赖关系
+      - name: Install Dependencies
         run: pnpm install --no-frozen-lockfile
 
-      # 7. 构建前端资源 (有些项目需要显式先 build 前端，再 build tauri)
+      # 7. 准备 Sidecar (核心/内核)
+      # 官方流程通常有一个脚本来下载内核。如果 dev 分支没有这个脚本，
+      # 下面的命令会尝试运行常见的 setup 脚本。如果报错可以忽略，但通常必须有内核。
+      - name: Setup Sidecar (Clash Core)
+        run: |
+          # 尝试运行可能存在的准备脚本
+          if npm run | grep -q "check"; then pnpm run check; fi
+          if npm run | grep -q "setup"; then pnpm run setup; fi
+          
+          # 打印一下 sidecar 目录，确认内核是否下载成功 (调试用)
+          echo "Checking sidecar directory..."
+          ls -R src-tauri/sidecar || echo "Sidecar directory not found or empty"
+
+      # 8. 构建前端
       - name: Build Frontend
         run: pnpm build
 
-      # 8. 打包 Tauri 应用
+      # 9. 构建 Tauri App (AppImage)
       - name: Build Tauri App
-        run: pnpm tauri build
+        uses: tauri-apps/tauri-action@v0 # 使用官方 Action 包装器，更稳定
         env:
-          # 这是一个常见的修复 glib 问题的环境变量
-          PKG_CONFIG_SYSROOT_DIR: / 
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: app-verge-dev # 给构建打个临时的 tag
+          releaseName: 'Clash Verge Rev Dev Build'
+          releaseBody: 'Auto built from dev branch'
+          releaseDraft: true
+          prerelease: true
+          args: --target x86_64-unknown-linux-gnu --bundles appimage
 
-      # 9. 上传结果
+      # 10. 上传构建产物 (如果上面的 tauri-action 没自动上传，这里兜底)
       - name: Upload Artifacts
+        if: always() # 即使上面失败了也尝试上传日志，方便排错
         uses: actions/upload-artifact@v4
         with:
-          name: clash-verge-rev-v2.4.3-appimage
-          # 上传所有生成的 AppImage
-          path: src-tauri/target/release/bundle/appimage/*.AppImage
+          name: clash-verge-rev-linux-appimage
+          path: |
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/deb/*.deb
