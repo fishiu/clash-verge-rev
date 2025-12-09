@@ -39,9 +39,9 @@ jobs:
           node-version: 20
       
       - name: Install pnpm
-        uses: pnpm/action-setup@v2
+        uses: pnpm/action-setup@v3 # <--- 升级 action 版本
         with:
-          version: 8
+          version: 9 # <--- 关键修改：升级 pnpm 版本到 9
 
       # 5. 安装前端依赖
       - name: Install Frontend Dependencies
