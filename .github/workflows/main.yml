@@ -1,19 +1,21 @@
-name: Build Clash Verge Rev
+name: Build Clash Verge Rev (v2.4.3)
 
-# 触发条件：手动点击按钮触发 (workflow_dispatch)
 on: 
-  workflow_dispatch:
+  workflow_dispatch: # 手动触发
 
 jobs:
   build-linux:
-    runs-on: ubuntu-22.04 # 使用 Ubuntu 22.04 环境，自带很多工具
+    runs-on: ubuntu-20.04 # 官方使用的是 20.04，我们也用旧一点的系统以保证兼容性
 
     steps:
-      # 1. 拉取代码
+      # 1. 拉取代码：这次我们指定 v2.4.3 标签
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: v2.4.3  # <--- 锁定官方发布的 2.4.3 版本，保证代码没问题
+          submodules: recursive # 递归拉取子模块，防止缺文件
 
-      # 2. 安装系统依赖 (这里有 sudo，完美解决你缺库的问题！)
+      # 2. 安装 Linux 系统依赖 (参考官方文档)
       - name: Install System Dependencies
         run: |
           sudo apt-get update
@@ -31,33 +33,42 @@ jobs:
       # 3. 安装 Rust
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
 
-      # 4. 安装 Node.js 和 pnpm
+      # 4. 安装 Node.js
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-      
+
+      # 5. 安装 pnpm (使用项目指定的版本)
       - name: Install pnpm
-        uses: pnpm/action-setup@v3 # <--- 升级 action 版本
+        uses: pnpm/action-setup@v3
         with:
-          version: 9 # <--- 关键修改：升级 pnpm 版本到 9
+          version: 9.1.0 
+          run_install: false
 
-      # 5. 安装前端依赖
+      # 6. 安装依赖 (关键步骤：加上 --no-frozen-lockfile)
+      # 这样即便 lock 文件有点问题，pnpm 也会尝试重新生成，避免 workspace 报错
       - name: Install Frontend Dependencies
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
 
-      # 6. 执行构建 (Tauri Build)
-      - name: Build App
+      # 7. 构建前端资源 (有些项目需要显式先 build 前端，再 build tauri)
+      - name: Build Frontend
+        run: pnpm build
+
+      # 8. 打包 Tauri 应用
+      - name: Build Tauri App
         run: pnpm tauri build
         env:
-          # 有些 tauri 编译需要这个环境变量
-          NO_STRIP: true 
+          # 这是一个常见的修复 glib 问题的环境变量
+          PKG_CONFIG_SYSROOT_DIR: / 
 
-      # 7. 上传编译结果 (Artifact)
+      # 9. 上传结果
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: clash-verge-linux-build
-          # 这里的路径取决于编译输出的位置，通常在这里
+          name: clash-verge-rev-v2.4.3-appimage
+          # 上传所有生成的 AppImage
           path: src-tauri/target/release/bundle/appimage/*.AppImage
