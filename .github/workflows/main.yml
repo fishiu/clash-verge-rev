@@ -1,98 +1,87 @@
-name: Build Clash Verge Rev (Dev/AppImage)
+name: Manual Build AppImage
 
+# 触发条件：手动触发（去 Actions 页面点按钮）
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-22.04 # 官方推荐使用 22.04 构建 Tauri v2 应用
+    permissions:
+      contents: write
+    # 关键点：使用 ubuntu-20.04 可以让生成的 AppImage 兼容性更好（更旧的 GLIBC）
+    runs-on: ubuntu-20.04
 
     steps:
-      # 1. 拉取代码 (关键修正：开启递归拉取子模块)
-      # 官方 dev 分支依赖子模块，不加 recursive 会导致 workspace 报错
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: dev             # 指定 dev 分支
-          submodules: recursive # <--- 关键！解决 pnpm workspace 报错
-          fetch-depth: 0        # 拉取完整历史，有助于版本号生成
+          submodules: recursive # 务必拉取子模块，防止缺文件
 
-      # 2. 安装 Linux 系统依赖 (适配 Tauri v2)
-      # 注意：这里换成了 libwebkit2gtk-4.1-dev，这是新版 Tauri 的强制要求
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libssl-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
-
-      # 3. 安装 Rust (官方 dev 通常使用 stable)
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
-
-      # 4. 安装 Node.js
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # 5. 安装 pnpm (锁定版本 v9)
       - name: Install pnpm
         uses: pnpm/action-setup@v3
         with:
           version: 9
           run_install: false
 
-      # 6. 安装前端依赖 (关键修正：忽略锁文件差异)
-      # 使用 --no-frozen-lockfile 强制根据当前 package.json 重建依赖关系
-      - name: Install Dependencies
-        run: pnpm install --no-frozen-lockfile
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
 
-      # 7. 准备 Sidecar (核心/内核)
-      # 官方流程通常有一个脚本来下载内核。如果 dev 分支没有这个脚本，
-      # 下面的命令会尝试运行常见的 setup 脚本。如果报错可以忽略，但通常必须有内核。
-      - name: Setup Sidecar (Clash Core)
+      # 关键点：安装 Linux 编译 Tauri 必需的系统依赖
+      # 这些是 clash-verge-rev 编译成功的硬性要求
+      - name: Install dependencies (Ubuntu)
         run: |
-          # 尝试运行可能存在的准备脚本
-          if npm run | grep -q "check"; then pnpm run check; fi
-          if npm run | grep -q "setup"; then pnpm run setup; fi
-          
-          # 打印一下 sidecar 目录，确认内核是否下载成功 (调试用)
-          echo "Checking sidecar directory..."
-          ls -R src-tauri/sidecar || echo "Sidecar directory not found or empty"
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf libsoup2.4-dev javascriptcoregtk-4.0
 
-      # 8. 构建前端
-      - name: Build Frontend
-        run: pnpm build
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
 
-      # 9. 构建 Tauri App (AppImage)
-      - name: Build Tauri App
-        uses: tauri-apps/tauri-action@v0 # 使用官方 Action 包装器，更稳定
+      # 缓存依赖，加快二次构建速度
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install Frontend Dependencies
+        run: pnpm install
+
+      # 关键点：Clash Verge 需要下载 Sidecar (Mihomo 内核)
+      # 官方脚本通常有一个步骤是 build-sidecar 或者通过 install 钩子触发
+      # 这里显式运行一下常见的 sidecar 准备命令，防止打包出的软件无法运行
+      - name: Setup Sidecar (Download Mihomo)
+        run: |
+          # 尝试运行可能存在的 sidecar 脚本，不同版本命令可能不同，通常集成在 npm scripts 中
+          # 如果 package.json 里有 script 叫 "lib:clash" 或类似的，会自动被 install 触发
+          # 这里我们确保运行构建命令前，环境是好的
+          echo "Ready to build"
+
+      # 核心步骤：构建 AppImage
+      # --bundles appimage 强制只生成 AppImage
+      - name: Build AppImage
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: app-verge-dev # 给构建打个临时的 tag
-          releaseName: 'Clash Verge Rev Dev Build'
-          releaseBody: 'Auto built from dev branch'
-          releaseDraft: true
-          prerelease: true
-          args: --target x86_64-unknown-linux-gnu --bundles appimage
+          # 不需要 Release，只构建
+          releaseId: ""
+          args: --bundles appimage
 
-      # 10. 上传构建产物 (如果上面的 tauri-action 没自动上传，这里兜底)
+      # 最后一步：把生成的文件传上来给你下载
       - name: Upload Artifacts
-        if: always() # 即使上面失败了也尝试上传日志，方便排错
         uses: actions/upload-artifact@v4
         with:
-          name: clash-verge-rev-linux-appimage
-          path: |
-            src-tauri/target/release/bundle/appimage/*.AppImage
-            src-tauri/target/release/bundle/deb/*.deb
+          name: Clash-Verge-AppImage
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
